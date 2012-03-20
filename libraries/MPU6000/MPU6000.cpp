@@ -47,10 +47,12 @@ void MPU6000_Class::init(uint8_t cs_pin, uint8_t int_pin)
   digitalWrite(_MPU6000_cs_pin, HIGH);
   
   // Variable initialization
-  _gyro_bias_from_gravity_gain = 0.00005;
+  _gyro_bias_from_gravity_gain = 0.008;
   _yaw_compass_diff = COMPASS_NULL;
   _compass_correction_gain = 0.01;
-  _gyro_bias_from_compass_gain = 0.00005;   // not used now
+  _gyro_bias_from_compass_gain = 0.008; 
+  _compass_bias_time = 0;
+  _gyro_bias_time = 0;
 
 
   // Chip reset
@@ -390,6 +392,14 @@ void MPU6000_Class::gyro_offset_calibration()
 
 }
 
+// Read gyro offset registers (in gyro raw units)
+void MPU6000_Class::gyro_get_offset(int *gyro_offset)
+{
+    gyro_offset[0] = ((_SPI_read(MPUREG_XG_OFFS_USRH)<<8) | _SPI_read(MPUREG_XG_OFFS_USRL))>>1;
+    gyro_offset[1] = ((_SPI_read(MPUREG_YG_OFFS_USRH)<<8) | _SPI_read(MPUREG_YG_OFFS_USRL))>>1;
+    gyro_offset[2] = ((_SPI_read(MPUREG_ZG_OFFS_USRH)<<8) | _SPI_read(MPUREG_ZG_OFFS_USRL))>>1;
+}
+
 // This functions adds an offset to acceleromter readings
 // This is usefull for dynamic acceleration correction (for example centripetal force correction)
 // and for the initial offset calibration 
@@ -513,6 +523,8 @@ void MPU6000_Class::gyro_bias_correction_from_gravity()
 {
   float errorRollPitch[2];
   uint8_t i;
+  long time_stamp;
+  float deltat;
 
   // We take the accelerometer readings and cumulate to average them and obtain the gravity vector
   _accel_filtered[0] += _accelX-_MPU6000_ACCEL_OFFSET[0];
@@ -521,30 +533,51 @@ void MPU6000_Class::gyro_bias_correction_from_gravity()
   _accel_filtered_samples++;
 
   _gyro_bias_from_gravity_counter++;
-  // We make the bias calculation and correction at a lower rate (25Hz)
+  // We make the bias calculation and correction at a lower rate (GYRO_BIAS_FROM_GRAVITY_RATE)
   if (_gyro_bias_from_gravity_counter==GYRO_BIAS_FROM_GRAVITY_RATE){
     _gyro_bias_from_gravity_counter = 0;
 
     for (i=0;i<3;i++){
       _accel_filtered[i] = _accel_filtered[i]/_accel_filtered_samples;  // average
     }
-
+    
     // Adjust ground reference : Accel Cross Gravity to obtain the error between gravity from accels and gravity from attitude solution
     // We use the  _DCM rotation matrix (in chip axis definition)
     // errorRollPitch are in Accel LSB units
     errorRollPitch[0] = _accel_filtered[1] * _DCM_internal[2][2] - _accel_filtered[2] * _DCM_internal[2][1];
-    errorRollPitch[1] = _accel_filtered[2] * _DCM_internal[2][0] - _accel_filtered[0] * _DCM_internal[2][2];    
+    errorRollPitch[1] = _accel_filtered[2] * _DCM_internal[2][0] - _accel_filtered[0] * _DCM_internal[2][2];
+
+    // Teorical delta time (we can better substitute this with the real measured elapsed time)
+    //deltat = 1.0/ (200.0/GYRO_BIAS_FROM_GRAVITY_RATE);   
+    
+    // Capture deltat (time elapsed since last call)
+    time_stamp = millis();
+    if (_gyro_bias_time==0){   // First call
+        deltat = 0;                 // No correction for the first time
+    }
+    else{
+        deltat = (time_stamp - _gyro_bias_time)/1000.0;
+    }
+    _gyro_bias_time = time_stamp;
+
+    errorRollPitch[0] *= deltat;
+    errorRollPitch[1] *= deltat;
+
+    // we limit to maximum gyro drift rate on each axis
+    float drift_limit = (_MPU6000_gyro_drift_rate * deltat) / _gyro_bias_from_gravity_gain;  //0.65*0.04 / 0.005 = 5.2
+    errorRollPitch[0] = constrain(errorRollPitch[0], -drift_limit, drift_limit);
+    errorRollPitch[1] = constrain(errorRollPitch[1], -drift_limit, drift_limit);
 
     // We correct gyroX and gyroY bias using the error vector
     _gyro_bias[0] += errorRollPitch[0]*_gyro_bias_from_gravity_gain;
     _gyro_bias[1] += errorRollPitch[1]*_gyro_bias_from_gravity_gain;
 
     // If bias values are greater than 1 LSB we update the hardware offset registers
-    if (fabs(_gyro_bias[0])>1){
+    if (fabs(_gyro_bias[0])>1.0){
       _gyro_offset_update(-1*(int)_gyro_bias[0],0,0);
       _gyro_bias[0] -= (int)_gyro_bias[0];  // we remove the part that we have already corrected on registers...
     }
-    if (fabs(_gyro_bias[1])>1){
+    if (fabs(_gyro_bias[1])>1.0){
       _gyro_offset_update(0,-1*(int)_gyro_bias[1],0);
       _gyro_bias[1] -= (int)_gyro_bias[1];
     }
@@ -953,11 +986,29 @@ float MPU6000_Class::_gyro_bias_correction_from_compass(float heading)
   float heading_x;
   float errorCourse;
   float errorYaw;
+  float deltat;
+  long time_stamp;
 
   //errorCourse= (_DCM_internal[0][0]*heading_y) - (_DCM_internal[1][0]*heading_x);  //Calculating YAW error
   errorCourse = _yaw_compass_diff;
-  errorYaw = _DCM_internal[2][2]*errorCourse;  // Calculate the component that affect the yaw gyro    
+  errorYaw = _DCM_internal[2][2]*errorCourse;  // Calculate the component that affect the yaw gyro   
 
+  // Capture deltat (time elapsed since last call)
+  time_stamp = millis();
+  if (_compass_bias_time==0){   // First call
+    deltat = 0;                 // No correction first time
+  }
+  else{
+    deltat = (time_stamp - _compass_bias_time)/1000.0;
+  }
+  _compass_bias_time = time_stamp;
+  
+  errorYaw *= deltat;
+  
+  // we limit to maximum gyro drift rate on each axis
+  float drift_limit = (_MPU6000_gyro_drift_rate * deltat) / _gyro_bias_from_compass_gain;
+  errorYaw = constrain(errorYaw, -drift_limit, drift_limit);
+  
   // We correct gyroZ bias using the compass solution
   _gyro_bias[2] += errorYaw*_gyro_bias_from_compass_gain;
 

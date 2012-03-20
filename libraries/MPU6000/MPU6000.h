@@ -13,7 +13,7 @@
 
 #define FIFO_PACKET_SIZE 18            // Default quaternion FIFO size (4*4) + Footer(2)
 #define MPU_FIFO_BUFFER_SIZE 72        // FIFO buffer size
-#define GYRO_BIAS_FROM_GRAVITY_RATE 8  // Rate of the gyro bias from gravity correction (200Hz/8) => 25Hz
+#define GYRO_BIAS_FROM_GRAVITY_RATE 4  // Rate of the gyro bias from gravity correction (200Hz/4) => 50Hz
 
 #define ACCEL_SCALE_G 8192             // (2G range) G = 8192
 
@@ -112,6 +112,8 @@
 #define MPU6000_66HZ 2
 #define MPU6000_50HZ 3
 
+// max rate of gyro drift in gyro_LSB_units/s (16.4LSB = 1deg/s)
+static const float _MPU6000_gyro_drift_rate = 0.5; // This correspond to 0.03 degrees/s/s;
 
 //dmpMem from dmpDefaultMantis.c
 extern unsigned char dmpMem[8][16][16] PROGMEM;
@@ -162,6 +164,7 @@ class MPU6000_Class
 	void accel_offset_calibration();   // Performs an accel offset calibration and store offset values
 	void accel_set_offset(int accel_x_offset, int accel_y_offset, int accel_z_offset);  // Set accelerometer offsets
 	void accel_get_offset(int *accel_offset);
+    void gyro_get_offset(int *gyro_offset);
 
 	// Gyro bias correction methods
 	void gyro_bias_correction_from_gravity();             // Function to correct the gyroX and gyroY bias (roll and pitch) using the gravity vector from accelerometers
@@ -218,6 +221,7 @@ class MPU6000_Class
 	float _gyro_bias[3]; // bias_tracking
 	float _gyro_bias_from_gravity_gain;  // bias correction algorithm gain
 	uint8_t _gyro_bias_from_gravity_counter;
+    long _gyro_bias_time;
 	
 	// FIFO variables
 	uint8_t _received_packet[MPU_FIFO_BUFFER_SIZE];    // FIFO packet buffer
@@ -228,6 +232,7 @@ class MPU6000_Class
 	float _yaw_compass_diff;
 	float _compass_correction_gain;
 	float _gyro_bias_from_compass_gain;  // default value (not used now)
+    long _compass_bias_time;
 
     // private methods
     uint8_t _SPI_read(uint8_t reg);
